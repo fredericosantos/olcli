@@ -153,3 +153,25 @@ test('listComments joins docs over several sockets, not one doc at a time on one
   assert.equal(open, 0, 'every socket is closed');
   assert.deepEqual(comments.map((c: any) => [c.threadId, c.path]), [['thread7', 'f7.tex']]);
 });
+
+test('httpRequest retries 429 (honoring Retry-After) and gives up after 5 retries', async () => {
+  for (const [failures, expectedStatus, expectedCalls] of [[2, 200, 3], [99, 429, 6]] as const) {
+    let calls = 0;
+    const server = createServer((_req, res) => {
+      calls++;
+      const limited = calls <= failures;
+      res.writeHead(limited ? 429 : 200, { 'Content-Type': 'application/json', ...(limited ? { 'Retry-After': '0' } : {}) });
+      res.end('{}');
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address() as { port: number };
+      const client = new OverleafClient({ cookies: { session: 's' }, csrf: 'c', baseUrl: `http://127.0.0.1:${port}` });
+      const res = await (client as any).httpRequest(`http://127.0.0.1:${port}/x`, { expect: 'json' });
+      assert.equal(res.status, expectedStatus);
+      assert.equal(calls, expectedCalls);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
+});

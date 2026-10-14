@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **`olcli comments list` (and `resolve`, `reopen`, `delete`, which look the thread up first) joins docs over four sockets instead of one doc at a time** - the command joined every doc in the project serially at about 0.25 s each, so a 43-doc project took around 14 s. One socket cannot overlap requests, since the long-poll gives an acknowledgment to whichever request polls first and the others time out, so the docs are spread across a small pool of sockets instead
 
+### Fixed
+- **Requests that Overleaf rejects with HTTP 429 are retried (up to 5 times, honoring `Retry-After`, else a 1 s to 16 s exponential backoff with jitter, about 30 s in total) instead of failing at once** - every CLI invocation fetches `/project` for a CSRF token, so a short burst of commands (for example scripted `comments add` calls) got `Failed to fetch projects page: 429`. A 429 means the request was not processed, so retrying is safe for every method
+
 ## [0.13.1] - 2026-10-09
 
 ### Fixed
