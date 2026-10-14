@@ -576,7 +576,17 @@ export class OverleafClient {
       });
     };
 
-    return doRequest(url, maxRedirects);
+    // Overleaf answers bursts with 429 (rejected, not processed), so retrying is safe for any method.
+    // It sends no Retry-After in practice and its limit lasts ~25 s, so back off 1, 2, 4, 8, 16 s (about
+    // 30 s in total) with +/-25% jitter so parallel callers do not retry in lockstep. Retry-After wins if present.
+    for (let attempt = 0; ; attempt++) {
+      const res = await doRequest(url, maxRedirects);
+      if (res.status !== 429 || attempt >= 5) return res;
+      const retryAfter = Number(res.headers['retry-after']);
+      const waitMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : 1000 * 2 ** attempt * (0.75 + Math.random() * 0.5);
+      this.logVerbose(`${method} ${url} -> 429, retrying in ${Math.round(waitMs)}ms (attempt ${attempt + 1}/5)`);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
   }
 
   /**
