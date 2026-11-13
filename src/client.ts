@@ -104,6 +104,15 @@ export interface ProjectComment {
 /** How much of Overleaf's text around a tracked change to keep, to find it again in an edited copy. */
 const CHANGE_CONTEXT = 40;
 
+/** Offset of the occurrence of `needle` nearest to `hint`, or -1. */
+function nearestIndex(text: string, needle: string, hint: number): number {
+  let best = -1;
+  for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + 1)) {
+    if (best === -1 || Math.abs(i - hint) < Math.abs(best - hint)) best = i;
+  }
+  return best;
+}
+
 export interface TrackedChange {
   id: string;
   docId: string;
@@ -121,6 +130,19 @@ export interface TrackedChange {
   user?: { id: string; first_name?: string; last_name?: string; email?: string };
   timestamp?: string;
 }
+
+/** A suggestion made offline: `deleted` was replaced by `inserted` between `before` and `after`. */
+export interface SuggestionEdit {
+  before: string;
+  after: string;
+  deleted: string;
+  inserted: string;
+  /** Roughly where it is in the doc (the local offset); the nearest match wins. */
+  hint: number;
+}
+
+/** done = it is now a suggestion on Overleaf; not-pushed = Overleaf still has the old text; not-found = neither. */
+export type SuggestionResult = 'done' | 'not-pushed' | 'not-found';
 
 export interface CommentContext {
   startLine: number;
@@ -2411,6 +2433,57 @@ export class OverleafClient {
     } finally {
       await this.closeProjectSocket(session);
     }
+  }
+
+  /**
+   * Turn edits that were already pushed (they are plain text on Overleaf now) into tracked changes, as if they had been
+   * typed in Reviewing mode: undo each one without tracking, then redo it with tracking. The text ends up unchanged,
+   * so the next git pull has nothing to merge. Edits whose new text is not on Overleaf are left alone.
+   */
+  async suggestChanges(projectId: string, filePath: string, edits: SuggestionEdit[]): Promise<SuggestionResult[]> {
+    const docs = this.collectProjectDocs(await this.getProjectInfo(projectId));
+    const normalizedPath = filePath.replace(/^\//, '');
+    const doc = docs.find(item => item.path.replace(/^\//, '') === normalizedPath);
+    if (!doc) {
+      throw new Error(`Doc not found: ${filePath}`);
+    }
+
+    const session = await this.openProjectSocket(projectId);
+    try {
+      const joinedDoc = await this.joinDocument(session, doc.id);
+      if (joinedDoc.type !== 'sharejs-text-ot') {
+        throw new Error('Suggestions are not supported for this doc type yet (history-ot)');
+      }
+      const content = joinedDoc.content;
+      let version = joinedDoc.version;
+      const send = async (op: object[], tc?: string) => {
+        await this.socketRpc(session, 'applyOtUpdate', [doc.id, { doc: doc.id, op, v: version, ...(tc ? { meta: { tc } } : {}) }]);
+        version++;
+      };
+      const results: SuggestionResult[] = [];
+      for (const edit of edits) {
+        const at = nearestIndex(content, edit.before + edit.inserted + edit.after, edit.hint - edit.before.length);
+        if (at === -1 || edit.inserted === edit.deleted) {
+          results.push(nearestIndex(content, edit.before + edit.deleted + edit.after, edit.hint - edit.before.length) === -1 ? 'not-found' : 'not-pushed');
+          continue;
+        }
+        const p = at + edit.before.length;
+        // Content is the same before and after each edit, so offsets of the next edits stay valid.
+        const undo = [...(edit.inserted ? [{ d: edit.inserted, p }] : []), ...(edit.deleted ? [{ i: edit.deleted, p }] : [])];
+        const redo = [...(edit.deleted ? [{ d: edit.deleted, p }] : []), ...(edit.inserted ? [{ i: edit.inserted, p }] : [])];
+        await send(undo);
+        await send(redo, this.generateTrackChangesSeed());
+        results.push('done');
+      }
+      return results;
+    } finally {
+      await this.closeProjectSocket(session);
+    }
+  }
+
+  /** Overleaf names tracked changes by an 18-hex-digit seed plus a counter; the seed travels in the update's meta.tc. */
+  private generateTrackChangesSeed(): string {
+    return Array.from({ length: 18 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
   }
 
   async postCommentMessage(projectId: string, threadId: string, content: string): Promise<CommentMessage | null> {

@@ -28,6 +28,8 @@ export {
   type CommentMessage,
   type ProjectComment,
   type TrackedChange,
+  type SuggestionEdit,
+  type SuggestionResult,
   type CommentContext,
   type ListCommentsOptions,
   type AddCommentOptions,

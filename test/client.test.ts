@@ -215,3 +215,26 @@ test('acceptChanges posts the change ids with the CSRF token', async () => {
     assert.deepEqual(JSON.parse(req?.body ?? ''), { change_ids: ['c1', 'c2'] });
   });
 });
+
+test('suggestChanges undoes a pushed edit untracked, redoes it tracked, and leaves unpushed edits alone', async () => {
+  const client: any = new OverleafClient({ cookies: {}, csrf: 'csrf-token' });
+  client.getProjectInfo = async () => ({ rootFolder: [{ docs: [{ _id: 'd1', name: 'main.tex' }], folders: [] }] });
+  client.openProjectSocket = async () => ({});
+  client.closeProjectSocket = async () => {};
+  client.joinDocument = async () => ({ docId: 'd1', content: 'The new cat sat.', lines: [], version: 7, type: 'sharejs-text-ot', ranges: {} });
+  const sent: any[] = [];
+  client.socketRpc = async (_s: object, name: string, args: any[]) => { sent.push([name, args[1]]); return []; };
+
+  const res = await client.suggestChanges('p', 'main.tex', [
+    { before: 'The ', deleted: 'old', inserted: 'new', after: ' cat', hint: 4 },
+    { before: 'cat ', deleted: 'sat', inserted: 'ran', after: '.', hint: 12 }
+  ]);
+
+  assert.deepEqual(res, ['done', 'not-pushed']);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0][1].op, [{ d: 'new', p: 4 }, { i: 'old', p: 4 }]);
+  assert.equal(sent[0][1].meta, undefined);
+  assert.deepEqual(sent[1][1].op, [{ d: 'old', p: 4 }, { i: 'new', p: 4 }]);
+  assert.match(sent[1][1].meta.tc, /^[0-9a-f]{18}$/);
+  assert.deepEqual([sent[0][1].v, sent[1][1].v], [7, 8]);
+});
