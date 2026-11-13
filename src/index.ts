@@ -41,6 +41,8 @@ export {
   type AcceptancePlan,
   type AcceptanceDocPlan,
   RejectConflictError,
+  type SuggestionEdit,
+  type SuggestionResult,
   type Credentials,
   type SessionCookiePair,
   // Type aliases
