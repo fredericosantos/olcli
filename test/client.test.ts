@@ -175,3 +175,43 @@ test('httpRequest retries 429 (honoring Retry-After) and gives up after 5 retrie
     }
   }
 });
+
+test('listReview returns tracked changes with context and their authors', async () => {
+  const client: any = new OverleafClient({ cookies: {}, csrf: 'csrf-token' });
+  client.getProjectInfo = async () => ({ rootFolder: [{ docs: [{ _id: 'd1', name: 'main.tex' }], folders: [] }] });
+  client.getCommentThreads = async () => ({});
+  client.openProjectSocket = async () => ({});
+  client.closeProjectSocket = async () => {};
+  client.joinDocument = async (_session: object, docId: string) => ({
+    docId,
+    content: 'as a new thing and more',
+    lines: ['as a new thing and more'],
+    version: 1,
+    type: 'sharejs-text-ot',
+    ranges: { changes: [
+      { id: 'c2', op: { p: 14, d: 'old' }, metadata: { user_id: 'u1', ts: '2026-11-13T06:42:53.250Z' } },
+      { id: 'c1', op: { p: 5, i: 'new thing' }, metadata: { user_id: 'u1', ts: '2026-11-13T06:42:53.250Z' } }
+    ] }
+  });
+  client.getChangeUsers = async () => [{ id: 'u1', first_name: 'Ada', last_name: 'L' }];
+
+  const { comments, changes } = await client.listReview('project');
+
+  assert.deepEqual(comments, []);
+  assert.deepEqual(changes.map((c: any) => [c.id, c.kind, c.text, c.position, c.before, c.after, c.user?.first_name]), [
+    ['c1', 'insert', 'new thing', 5, 'as a ', ' and more', 'Ada'],
+    ['c2', 'delete', 'old', 14, 'as a new thing', ' and more', 'Ada']
+  ]);
+});
+
+test('acceptChanges posts the change ids with the CSRF token', async () => {
+  await withServer({ body: {} }, async (baseUrl, getRequest) => {
+    const client = new OverleafClient({ cookies: {}, csrf: 'csrf-token', baseUrl });
+    await client.acceptChanges('p1', 'd1', ['c1', 'c2']);
+    const req = getRequest();
+    assert.equal(req?.method, 'POST');
+    assert.equal(req?.url, '/project/p1/doc/d1/changes/accept');
+    assert.equal(req?.headers['x-csrf-token'], 'csrf-token');
+    assert.deepEqual(JSON.parse(req?.body ?? ''), { change_ids: ['c1', 'c2'] });
+  });
+});

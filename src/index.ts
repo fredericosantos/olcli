@@ -27,6 +27,7 @@ export {
   type FileEntry,
   type CommentMessage,
   type ProjectComment,
+  type TrackedChange,
   type CommentContext,
   type ListCommentsOptions,
   type AddCommentOptions,

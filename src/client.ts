@@ -100,6 +100,28 @@ export interface ProjectComment {
   context?: CommentContext;
 }
 
+/** A tracked change ("suggestion") from Overleaf's track-changes. */
+/** How much of Overleaf's text around a tracked change to keep, to find it again in an edited copy. */
+const CHANGE_CONTEXT = 40;
+
+export interface TrackedChange {
+  id: string;
+  docId: string;
+  path: string;
+  /** Offset in Overleaf's copy of the doc. */
+  position: number;
+  line: number;
+  kind: 'insert' | 'delete';
+  /** The inserted text (it is in the doc) or the deleted text (it is not). */
+  text: string;
+  /** Overleaf's text just before and after the change, to find it again in an edited copy of the doc. */
+  before: string;
+  after: string;
+  userId?: string;
+  user?: { id: string; first_name?: string; last_name?: string; email?: string };
+  timestamp?: string;
+}
+
 export interface CommentContext {
   startLine: number;
   endLine: number;
@@ -1271,6 +1293,10 @@ export class OverleafClient {
         comment.op.c = this.decodeOverleafUtf8(comment.op.c);
       }
     }
+    for (const change of decodedRanges.changes || []) {
+      if (typeof change?.op?.i === 'string') change.op.i = this.decodeOverleafUtf8(change.op.i);
+      if (typeof change?.op?.d === 'string') change.op.d = this.decodeOverleafUtf8(change.op.d);
+    }
 
     return {
       docId,
@@ -2084,12 +2110,21 @@ export class OverleafClient {
   }
 
   async listComments(projectId: string, options: ListCommentsOptions = {}): Promise<ProjectComment[]> {
+    return (await this.listReview(projectId, options)).comments;
+  }
+
+  /**
+   * Comments and tracked changes from one pass over the docs (joining docs is the slow part).
+   * Tracked changes are read from sharejs-text-ot docs only; history-ot docs keep them in another format.
+   */
+  async listReview(projectId: string, options: ListCommentsOptions = {}): Promise<{ comments: ProjectComment[]; changes: TrackedChange[] }> {
     const status = options.status || 'all';
     const contextLines = options.contextLines || 0;
     const projectInfo = await this.getProjectInfo(projectId);
     const docs = this.collectProjectDocs(projectInfo);
     const threads = await this.getCommentThreads(projectId);
     const comments: ProjectComment[] = [];
+    const changes: TrackedChange[] = [];
     const joinedDocs = await this.joinDocuments(projectId, docs);
 
     for (const [index, doc] of docs.entries()) {
@@ -2122,6 +2157,27 @@ export class OverleafClient {
         continue;
       }
 
+      for (const change of joinedDoc.ranges.changes || []) {
+        const op = change.op || {};
+        const kind = typeof op.i === 'string' ? 'insert' : typeof op.d === 'string' ? 'delete' : undefined;
+        if (!kind || typeof op.p !== 'number' || !change.id) continue;
+        const text: string = kind === 'insert' ? op.i : op.d;
+        const end = kind === 'insert' ? op.p + text.length : op.p;
+        changes.push({
+          id: change.id,
+          docId: doc.id,
+          path: doc.path,
+          position: op.p,
+          line: this.positionToLineColumn(joinedDoc.content, op.p).line,
+          kind,
+          text,
+          before: joinedDoc.content.slice(Math.max(0, op.p - CHANGE_CONTEXT), op.p),
+          after: joinedDoc.content.slice(end, end + CHANGE_CONTEXT),
+          userId: change.metadata?.user_id,
+          timestamp: change.metadata?.ts
+        });
+      }
+
       for (const comment of joinedDoc.ranges.comments || []) {
         const op = comment.op || {};
         const threadId = op.t || comment.id;
@@ -2147,12 +2203,47 @@ export class OverleafClient {
       }
     }
 
-    return comments
-      .filter(comment => {
-        if (status === 'all') return true;
-        return status === 'resolved' ? comment.resolved : !comment.resolved;
-      })
-      .sort((a, b) => a.path.localeCompare(b.path) || a.position - b.position);
+    if (changes.length) {
+      const users = await this.getChangeUsers(projectId).catch(() => []); // names are nice to have, not worth failing for
+      for (const change of changes) change.user = users.find(u => u.id === change.userId);
+    }
+
+    return {
+      comments: comments
+        .filter(comment => {
+          if (status === 'all') return true;
+          return status === 'resolved' ? comment.resolved : !comment.resolved;
+        })
+        .sort((a, b) => a.path.localeCompare(b.path) || a.position - b.position),
+      changes: changes.sort((a, b) => a.path.localeCompare(b.path) || a.position - b.position)
+    };
+  }
+
+  /** The authors of a project's tracked changes. */
+  async getChangeUsers(projectId: string): Promise<{ id: string; first_name?: string; last_name?: string; email?: string }[]> {
+    const response = await this.httpRequest(`${this.baseUrl}/project/${projectId}/changes/users`, {
+      headers: this.getHeaders(),
+      expect: 'json'
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch change authors: ${response.status}`);
+    }
+    this.applySetCookieHeaders(response.headers['set-cookie'] as string[] | undefined);
+    return Array.isArray(response.body) ? response.body : [];
+  }
+
+  /** Accept tracked changes: Overleaf keeps their effect on the text and drops the markers. */
+  async acceptChanges(projectId: string, docId: string, changeIds: string[]): Promise<void> {
+    const response = await this.httpRequest(`${this.baseUrl}/project/${projectId}/doc/${docId}/changes/accept`, {
+      method: 'POST',
+      headers: this.getHeaders(true),
+      body: JSON.stringify({ change_ids: changeIds }),
+      expect: 'text'
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to accept changes: ${response.status}`);
+    }
+    this.applySetCookieHeaders(response.headers['set-cookie'] as string[] | undefined);
   }
 
   async resolveComment(projectId: string, threadId: string): Promise<ProjectComment> {
